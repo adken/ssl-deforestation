@@ -3,4 +3,4 @@ Multi-modal fusion of optical and radar satellite image time series for deforest
 * Data preprocessing
 * Dataloader
 * tempCNN backbone
-*Vicreg(Variance Invariance Covariance regularization)
+* Vicreg(Variance Invariance Covariance regularization)
