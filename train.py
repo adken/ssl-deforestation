@@ -4,21 +4,24 @@ from torch.utils.data import DataLoader
 from project.utils.utils import augment, adjust_learning_rate, optim
 from project.models.model import VICRegNet
 from project.utils.loss import sim_loss, cov_loss, std_loss
+from project.utils.dataset import TimeSeriesDataset
 import argparse
 from torch.utils.tensorboard import SummaryWriter
 import os
 from tqdm import tqdm
 
 parser = argparse.ArgumentParser(description='VICReg Training')
-parser.add_argument('--path', help='path to dataset')
-parser.add_argument('--batch_size', default=2048, type=int, help='batch size')
+parser.add_argument('--s1_path', help='path to s1 dataset')
+parser.add_argument('--s2_path', help='path to s2 dataset')
+parser.add_argument('--batch_size', default=16, type=int, help='batch size')
+parser.add_argument('--num_workers', type=int, default=4, help='number of workers')
 parser.add_argument('--device', default='cuda', type=str, help='device for training')
 parser.add_argument('--l', default=25,  help='coefficients of the invariance')
 parser.add_argument('--mu', default=25,  help='coefficients of the variance')
 parser.add_argument('--nu', default=1,  help='coefficients of the covariance')
 parser.add_argument('--weight_decay', default=1e-6,  help='weight decay')
 parser.add_argument('--lr', default=0.2,  help='weight decay')
-parser.add_argument('--epoch', default=1000,  help='number of epochs')
+parser.add_argument('--epoch', default=100,  help='number of epochs')
 parser.add_argument('--log_dir', default=r'logs', help = 'directory to save logs')
 parser.add_argument('--save_chpt', default = 'checkpoints', help = 'path to save checkpoints')
 parser.add_argument('--save_freq', default=1000, help='step frequency to save checkpoints')
@@ -27,8 +30,8 @@ def main():
     print('Training Starts')
     args = parser.parse_args()
     writer = SummaryWriter(log_dir=args.log_dir)
-    t_set = datasets.ImageFolder(root=args.path, transform=augment)
-    loader = DataLoader(t_set, batch_size=args.batch_size)
+    dataset = TimeSeriesDataset(s1_path=args.s1_path, s2_path=args.s2_path)
+    loader = DataLoader(dataset, batch_size=args.batch_size,drop_last=True, shuffle=False, num_workers=args.num_workers, prefetch_factor=2)
 
     model = VICRegNet().to(args.device)
     optimizer = optim(model, args.weight_decay)
