@@ -31,7 +31,7 @@ def main():
     args = parser.parse_args()
     writer = SummaryWriter(log_dir=args.log_dir)
     dataset = TimeSeriesDataset(s1_path=args.s1_path, s2_path=args.s2_path)
-    loader = DataLoader(dataset, batch_size=args.batch_size,drop_last=True, shuffle=False, num_workers=args.num_workers, prefetch_factor=2)
+    dataloader = DataLoader(dataset, batch_size=args.batch_size,drop_last=True, shuffle=False, num_workers=args.num_workers, prefetch_factor=2)
 
     model = VICRegNet().to(args.device)
     optimizer = optim(model, args.weight_decay)
@@ -39,12 +39,12 @@ def main():
     os.makedirs(os.path.join('.', args.save_chpt), exist_ok=True)
 
     for epoch in range(0, args.epoch):
-        loop = tqdm(enumerate(loader, start=epoch * len(loader)), total=len(loader), leave=False)
-        for step, ((img_a, img_b), _) in loop:
-            adjust_learning_rate(args, optimizer, loader, step)
+        loop = tqdm(enumerate(dataloader, start=epoch * len(dataloader)), total=len(dataloader), leave=False)
+        for step, ((view_a, view_b)) in loop:
+            adjust_learning_rate(args, optimizer, dataloader, step)
             optimizer.zero_grad()
-            repr_a = model(img_a.to(args.device))
-            repr_b = model(img_b.to(args.device))
+            repr_a = model(view_a.to(args.device))
+            repr_b = model(view_b.to(args.device))
 
             _sim_loss = sim_loss(repr_a, repr_b)
             _std_loss = std_loss(repr_a, repr_b)
