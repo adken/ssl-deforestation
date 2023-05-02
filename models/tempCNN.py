@@ -11,10 +11,9 @@ encoder for self-supervised learning with VICREG
 
 
 class TempCNN(torch.nn.Module):
-    def __init__(self, input_dim=13, num_classes=9, sequencelength=45, kernel_size=7, hidden_dims=128, dropout=0.18203942949809093):
+    def __init__(self, input_dim=13, kernel_size=7, hidden_dims=128, dropout=0.18203942949809093):
         super(TempCNN, self).__init__()
-        self.modelname = f"TempCNN_input-dim={input_dim}_num-classes={num_classes}_sequencelenght={sequencelength}_" \
-                         f"kernelsize={kernel_size}_hidden-dims={hidden_dims}_dropout={dropout}"
+        self.modelname = f"TempCNN_input-dim={input_dim}_kernelsize={kernel_size}_hidden-dims={hidden_dims}_dropout={dropout}"
 
         self.hidden_dims = hidden_dims
 
