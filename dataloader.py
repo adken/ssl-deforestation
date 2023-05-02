@@ -31,7 +31,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # Path to dataset
-path = '/Users/adken/brittany/cde/Code/masters/s2.tif'
+path = './data/s2.tif'
 
 # Dataset class
 class PixelDataset(Dataset):
