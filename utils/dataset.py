@@ -8,16 +8,14 @@ import torch.nn as nn
 import torch.utils.data
 from torchvision.datasets import ImageFolder
 import warnings
-warnings.filterwarnings("ignore")
 
-class DualPixelDataset(Dataset):
+class TimeSeriesDataset(Dataset):
     """
     A PyTorch dataset class for loading s1 and s2 satellite time series images from a NumPy file.
-    The images are expected to have dimensions N,T x C, where:
-    H: height of images
-    W: width of images
+    The images are expected to have dimensions N x T x D, where:
+    N: number of pixels in each dataset
     T: number of timestamps in the time series
-    C: number of channels in the images
+    D: number of dimensions or channels in the images
     
     Parameters
     ----------
