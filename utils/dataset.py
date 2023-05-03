@@ -16,7 +16,7 @@ class TimeSeriesDataset(Dataset):
     
     Parameters
     ----------
-    s1_path : str
+    path : str
         The path to the directory containing the sentinel1 and sentinel2 times series data.
       
     Attributes
