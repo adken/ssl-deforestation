@@ -8,18 +8,17 @@ from torch.utils.data import Dataset
 class TimeSeriesDataset(Dataset):
     """
     A PyTorch dataset class for loading s1 and s2 satellite time series images from a NumPy file.
-    The images are expected to have dimensions N x T x D, where:
-    N: number of pixels in each dataset
+    The images are expected to have dimensions N,T x C, where:
+    H: height of images
+    W: width of images
     T: number of timestamps in the time series
-    D: number of dimensions or channels in the images
+    C: number of channels in the images
     
     Parameters
     ----------
     s1_path : str
-        The path to the NumPy file containing the sentinel1 image data.
-     s2_path : str
-        The path to the NumPy file containing the sentinel2 image data.
-        
+        The path to the directory containing the sentinel1 and sentinel2 times series data.
+      
     Attributes
     ----------
     s1, s2 : torch.Tensor
@@ -28,10 +27,11 @@ class TimeSeriesDataset(Dataset):
         The total number of samples (pixels) in the dataset.
     """
     
-    def __init__(self, s1_path, s2_path, transforms=None):
+    def __init__(self, path, transforms=None):
 
-        self.dataset1 = np.load(s1_path)
-        dataset2 = np.load(s2_path)
+        self.path = path
+        self.dataset1 = np.load(os.path.join(self.path, 's1_stack.npy'))
+        dataset2 = np.load(os.path.join(self.path, 's2_stack.npy'))
         self.x2 = torch.from_numpy(dataset2)
         self.num_samples = self.dataset1.shape[0] + self.x2.shape[0]
  
