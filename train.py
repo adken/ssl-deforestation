@@ -1,10 +1,10 @@
 import torch
 from torchvision import datasets
 from torch.utils.data import DataLoader
-from project.utils.utils import augment, adjust_learning_rate, optim
-from project.models.model import VICRegNet
-from project.utils.loss import sim_loss, cov_loss, std_loss
-from project.utils.dataset import TimeSeriesDataset
+from utils.utils import augment, adjust_learning_rate, optim
+from models.model import VICRegNet
+from utils.loss import sim_loss, cov_loss, std_loss
+from utils.dataset import TimeSeriesDataset
 import argparse
 from torch.utils.tensorboard import SummaryWriter
 import os
