@@ -11,7 +11,7 @@ import os
 from tqdm import tqdm
 
 parser = argparse.ArgumentParser(description='VICReg Training')
-parser.add_argument('--path', help='path to s1 dataset')
+parser.add_argument('--path', help='path to datasets')
 parser.add_argument('--batch_size', default=16, type=int, help='batch size')
 parser.add_argument('--num_workers', type=int, default=4, help='number of workers')
 parser.add_argument('--device', default='cuda', type=str, help='device for training')
