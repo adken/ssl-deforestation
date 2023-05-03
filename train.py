@@ -11,8 +11,7 @@ import os
 from tqdm import tqdm
 
 parser = argparse.ArgumentParser(description='VICReg Training')
-parser.add_argument('--s1_path', help='path to s1 dataset')
-parser.add_argument('--s2_path', help='path to s2 dataset')
+parser.add_argument('--path', help='path to s1 dataset')
 parser.add_argument('--batch_size', default=16, type=int, help='batch size')
 parser.add_argument('--num_workers', type=int, default=4, help='number of workers')
 parser.add_argument('--device', default='cuda', type=str, help='device for training')
@@ -30,7 +29,7 @@ def main():
     print('Training Starts')
     args = parser.parse_args()
     writer = SummaryWriter(log_dir=args.log_dir)
-    dataset = TimeSeriesDataset(s1_path=args.s1_path, s2_path=args.s2_path)
+    dataset = TimeSeriesDataset(path=args.path)
     dataloader = DataLoader(dataset, batch_size=args.batch_size,drop_last=True, shuffle=False, num_workers=args.num_workers, prefetch_factor=2)
 
     model = VICRegNet().to(args.device)
