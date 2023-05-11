@@ -1,32 +1,34 @@
 import torch
-#from torchvision.models import resnet50
-from tempCNN import TempCNN
+from models.tempCNN import TempCNN as TempCNNEncoder
 import torch.nn as nn
 
 
 class VICRegNet(nn.Module):
-    def __init__(self):
+    def __init__(self,
+                 hidden_dim=128,
+                 expander_dim=256):
         super().__init__()
-        #self.encoder = resnet50(pretrained=False)
-        self.encoder = TempCNN()
-        #self.encoder = torch.nn.Sequential(*(list(self.encoder.children())[:-1]),
-        #                           nn.Flatten())
+        self.encoder_s1 = TempCNNEncoder(input_dim=2, kernel_size=5, hidden_dims=hidden_dim, dropout=0.5)
+        self.encoder_s2 = TempCNNEncoder(input_dim=10, kernel_size=5, hidden_dims=hidden_dim, dropout=0.5)
 
         self.expander = nn.Sequential(
-            #nn.Linear(2048, 8192),
-            nn.Linear(128, 8192),
-            nn.BatchNorm1d(8192),
+            nn.Linear(hidden_dim, expander_dim),
+            nn.BatchNorm1d(expander_dim),
             nn.ReLU(),
-            nn.Linear(8192, 8192),
-            nn.BatchNorm1d(8192),
+            nn.Linear(expander_dim, expander_dim),
+            nn.BatchNorm1d(expander_dim),
             nn.ReLU(),
-            nn.Linear(8192, 8192))
+            nn.Linear(expander_dim, expander_dim))
 
-    def forward(self, x):
-        _repr = self.encoder(x)
-        _embeds = self.expander(_repr.squeeze())
-        #_embeds = self.expander(_repr)
-        return _embeds
+    def forward(self, s1, s2):
+        _repr_s1 = self.encoder_s1(s1)
+        _repr_s2 = self.encoder_s2(s2)
+
+        _embeds_1 = self.expander(_repr_s1.squeeze())
+        _embeds_2 = self.expander(_repr_s2.squeeze())
+
+        return _embeds_1, _embeds_2
+
 
 
 if __name__ == '__main__':
