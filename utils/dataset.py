@@ -29,8 +29,8 @@ class TimeSeriesDataset(Dataset):
     def __init__(self, path, transforms=None):
 
         self.path = path
-        self.dataset1 = np.load(os.path.join(self.path, 's1_stack.npy'))
-        self.dataset2 = np.load(os.path.join(self.path, 's2_stack.npy'))
+        self.dataset1 = np.load(os.path.join(self.path, 's1_stack.npy'), mmap_mode='r')
+        self.dataset2 = np.load(os.path.join(self.path, 's2_stack.npy'), mmap_mode='r')
         self.num_samples = self.dataset1.shape[0] + self.dataset2.shape[0]
     
  
