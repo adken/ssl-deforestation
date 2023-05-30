@@ -16,7 +16,7 @@ class TimeSeriesDataset(Dataset):
     Parameters
     ----------
     path : str
-        The path to the NumPy file containing the image data.
+        The path to the NumPy file containing the image data and labels.
         
     Attributes
     ----------
