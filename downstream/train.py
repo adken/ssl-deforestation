@@ -17,8 +17,6 @@ import sklearn.metrics
 import random
 
 
-
-
 def train(args):
         
     # Set a seed for reproducibility
@@ -49,7 +47,7 @@ def train(args):
     num_classes = 2
     # define model
     device = torch.device(args.device)
-    model = get_model(args.mode, num_classes, device, **args.hyperparameter)
+    model = get_model(args.mode, num_classes, device)
     optimizer = Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     model.modelname += f"_learning-rate={args.learning_rate}_weight-decay={args.weight_decay}"
     print(f"Initialized {model.modelname}")
@@ -156,39 +154,66 @@ def metrics(y_true, y_pred):
 
 def train_epoch(model, optimizer, criterion, dataloader, device):
     model.train()
-    losses = list()
+    losses = []
     with tqdm(enumerate(dataloader), total=len(dataloader), leave=True) as iterator:
         for idx, batch in iterator:
             optimizer.zero_grad()
-            x, y_true, _ = batch
-            loss = criterion(model.forward(x.to(device)), y_true.to(device))
+            x1, x2, y_true = batch
+            x1 = x1.to(device)
+            x2 = x2.to(device)
+            y_true = y_true.to(device)
+
+            # Forward pass
+            logits = model(x1, x2)
+            logprobabilities = torch.log_softmax(logits, dim=-1)
+
+            # Compute loss
+            loss = criterion(logprobabilities, y_true)
+
+            # Backward pass and optimization step
             loss.backward()
             optimizer.step()
-            iterator.set_description(f"train loss={loss:.2f}")
-            losses.append(loss)
+
+            # Record loss
+            losses.append(loss.item())
+
+            # Update progress bar
+            iterator.set_description(f"train loss={loss.item():.2f}")
+
     return torch.stack(losses)
+
 
 
 def test_epoch(model, criterion, dataloader, device):
     model.eval()
     with torch.no_grad():
-        losses = list()
-        y_true_list = list()
-        y_pred_list = list()
-        y_score_list = list()
-        field_ids_list = list()
+        losses = []
+        y_true_list = []
+        y_pred_list = []
+        y_score_list = []
+        field_ids_list = []
         with tqdm(enumerate(dataloader), total=len(dataloader), leave=True) as iterator:
             for idx, batch in iterator:
-                x, y_true, field_id = batch
-                logprobabilities = model.forward(x.to(device))
-                loss = criterion(logprobabilities, y_true.to(device))
-                iterator.set_description(f"test loss={loss:.2f}")
-                losses.append(loss)
+                x1, x2, y_true, field_id = batch
+                x1 = x1.to(device)
+                x2 = x2.to(device)
+                y_true = y_true.to(device)
+
+                # Forward pass
+                logits = model(x1, x2)
+                logprobabilities = torch.log_softmax(logits, dim=-1)
+
+                # Compute loss
+                loss = criterion(logprobabilities, y_true)
+
+                iterator.set_description(f"test loss={loss.item():.2f}")
+                losses.append(loss.item())
                 y_true_list.append(y_true)
                 y_pred_list.append(logprobabilities.argmax(-1))
                 y_score_list.append(logprobabilities.exp())
                 field_ids_list.append(field_id)
-        return torch.stack(losses), torch.cat(y_true_list), torch.cat(y_pred_list), torch.cat(y_score_list), torch.cat(field_ids_list)
+
+        return (torch.tensor(losses), torch.cat(y_true_list), torch.cat(y_pred_list), torch.cat(y_score_list), torch.cat(field_ids_list))
 
 
 def parse_args():
