@@ -2,6 +2,7 @@ import torch
 from torchvision import datasets
 from torch.utils.data import DataLoader
 from utils.dataset import TimeSeriesDataset
+from models.tempCNN import TemporalCNN
 import argparse
 from torch.utils.tensorboard import SummaryWriter
 import os
@@ -13,17 +14,42 @@ import torch
 import pandas as pd
 import os
 import sklearn.metrics
+import random
+
+
 
 
 def train(args):
-    traindataloader, testdataloader, meta = get_dataloader(args.datapath, args.mode, args.batchsize, args.workers, args.preload_ram, args.level)
+        
+    # Set a seed for reproducibility
+    seed = 42
+    random.seed(seed)
+    torch.manual_seed(seed)
 
-    num_classes = meta["num_classes"]
-    ndims = meta["ndims"]
-    sequencelength = meta["sequencelength"]
+    dataset = TimeSeriesDataset(path=args.path)
 
+    # Define the sizes for train, test, and validation sets
+    train_ratio = 0.3  # 30% of the dataset for training
+    test_ratio = 0.4   # 10% of the dataset for testing
+    val_ratio = 0.3    # 10% of the dataset for validation
+
+    # Calculate the sizes of each set
+    train_size = int(len(dataset) * train_ratio)
+    test_size = int(len(dataset) * test_ratio)
+    val_size = len(dataset) - train_size - test_size
+
+    # Split the dataset into train, test, and validation sets
+    train_ds, test_ds, val_ds = torch.utils.data.random_split(dataset, [train_size, test_size, val_size])
+
+    # Create data loaders for each set
+    train_dl = DataLoader(train_ds, batch_size=args.batch_size, drop_last=True, shuffle=False, num_workers=args.num_workers, prefetch_factor=2)
+    test_dl = DataLoader(test_ds, batch_size=args.batch_size, drop_last=True, shuffle=False, num_workers=args.num_workers, prefetch_factor=2)
+    val_dl = DataLoader(val_ds, batch_size=args.batch_size, drop_last=True, shuffle=False, num_workers=args.num_workers, prefetch_factor=2)
+
+    num_classes = 2
+    # define model
     device = torch.device(args.device)
-    model = get_model(args.model, ndims, num_classes, sequencelength, device, **args.hyperparameter)
+    model = get_model(args.mode, num_classes, device, **args.hyperparameter)
     optimizer = Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     model.modelname += f"_learning-rate={args.learning_rate}_weight-decay={args.weight_decay}"
     print(f"Initialized {model.modelname}")
@@ -33,110 +59,72 @@ def train(args):
     print(f"Logging results to {logdir}")
 
     criterion = torch.nn.CrossEntropyLoss(reduction="mean")
+    log = []
+    best_val_loss = float('inf')
+    best_model = None
 
-    log = list()
     for epoch in range(args.epochs):
-        train_loss = train_epoch(model, optimizer, criterion, traindataloader, device)
-        test_loss, y_true, y_pred, *_ = test_epoch(model, criterion, testdataloader, device)
-        scores = metrics(y_true.cpu(), y_pred.cpu())
-        scores_msg = ", ".join([f"{k}={v:.2f}" for (k, v) in scores.items()])
-        test_loss = test_loss.cpu().detach().numpy()[0]
+        train_loss = train_epoch(model, optimizer, criterion, train_dl, device)
+        val_loss, y_true_val, y_pred_val, *_ = test_epoch(model, criterion, val_dl, device)
+        val_scores = metrics(y_true_val.cpu(), y_pred_val.cpu())
+        val_scores_msg = ", ".join([f"{k}={v:.2f}" for (k, v) in val_scores.items()])
+        val_loss = val_loss.cpu().detach().numpy()[0]
         train_loss = train_loss.cpu().detach().numpy()[0]
-        print(f"epoch {epoch}: trainloss {train_loss:.2f}, testloss {test_loss:.2f} " + scores_msg)
+        print(f"epoch {epoch}: train_loss={train_loss:.2f}, val_loss={val_loss:.2f} " + val_scores_msg)
 
+        scores = {}
         scores["epoch"] = epoch
         scores["trainloss"] = train_loss
-        scores["testloss"] = test_loss
+        scores["val_loss"] = val_loss
         log.append(scores)
 
         log_df = pd.DataFrame(log).set_index("epoch")
         log_df.to_csv(os.path.join(logdir, "trainlog.csv"))
 
-def get_dataloader(datapath, mode, batchsize, workers, preload_ram=False, level="L1C"):
-    print(f"Setting up datasets in {os.path.abspath(datapath)}, level {level}")
-    datapath = os.path.abspath(datapath)
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_model = model.state_dict()
 
-    if mode == "unittest":
-        belle_ile = breizhcrops.BreizhCrops(region="belle-ile", root=datapath)
+    # Load the best model for testing
+    model.load_state_dict(best_model)
+
+    # Perform the final evaluation on the test set
+    test_loss, y_true_test, y_pred_test, *_ = test_epoch(model, criterion, test_dl, device)
+    test_scores = metrics(y_true_test.cpu(), y_pred_test.cpu())
+    test_scores_msg = ", ".join([f"{k}={v:.2f}" for (k, v) in test_scores.items()])
+    test_loss = test_loss.cpu().detach().numpy()[0]
+    print(f"Final test_loss={test_loss:.2f} " + test_scores_msg)
+
+    test_scores["test_loss"] = test_loss
+    test_log = pd.DataFrame([test_scores])
+    test_log.to_csv(os.path.join(logdir, "testlog.csv"))
+
+    val_log_df = pd.DataFrame(log).set_index("epoch")
+    val_log_df.to_csv(os.path.join(logdir, "vallog.csv"))
+
+
+
+def get_model(mode, num_classes, device, pretrained_path=None, **hyperparameter):
+    mode = mode.lower()  # make case invariant
+    
+    if mode == "supervised":
+        model = TemporalCNN(num_classes=num_classes, **hyperparameter).to(device)
+        
+    elif mode == "freeze" or mode == "fine-tuning":
+        model = TemporalCNN(num_classes=num_classes, **hyperparameter).to(device)
+        
+        if pretrained_path is not None:
+            model.load_state_dict(torch.load(pretrained_path))  # Load pretrained model weights
+        
+        if mode == "freeze":
+            for param in model.parameters():
+                param.requires_grad = False  # Freeze the model parameters
+    
     else:
-        frh01 = breizhcrops.BreizhCrops(region="frh01", root=datapath,
-                                        preload_ram=preload_ram, level=level)
-        frh02 = breizhcrops.BreizhCrops(region="frh02", root=datapath,
-                                        preload_ram=preload_ram, level=level)
-        frh03 = breizhcrops.BreizhCrops(region="frh03", root=datapath,
-                                        preload_ram=preload_ram, level=level)
-
-    if "evaluation" in mode:
-            frh04 = breizhcrops.BreizhCrops(region="frh04", root=datapath,
-                                            preload_ram=preload_ram, level=level)
-
-    if mode == "evaluation" or mode == "evaluation1":
-        traindatasets = torch.utils.data.ConcatDataset([frh01, frh02, frh03])
-        testdataset = frh04
-    elif mode == "evaluation2":
-        traindatasets = torch.utils.data.ConcatDataset([frh01, frh02, frh04])
-        testdataset = frh03
-    elif mode == "evaluation3":
-        traindatasets = torch.utils.data.ConcatDataset([frh01, frh03, frh04])
-        testdataset = frh02
-    elif mode == "evaluation4":
-        traindatasets = torch.utils.data.ConcatDataset([frh02, frh03, frh04])
-        testdataset = frh01
-    elif mode == "validation":
-        traindatasets = torch.utils.data.ConcatDataset([frh01, frh02])
-        testdataset = frh03
-    elif mode == "unittest":
-        traindatasets = belle_ile
-        testdataset = belle_ile
-    else:
-        raise ValueError("only --mode 'validation' or 'evaluation' allowed")
-
-    traindataloader = DataLoader(traindatasets, batch_size=batchsize, shuffle=True, num_workers=workers)
-    testdataloader = DataLoader(testdataset, batch_size=batchsize, shuffle=False, num_workers=workers)
-
-    meta = dict(
-        ndims=13 if level == "L1C" else 10,
-        num_classes=len(belle_ile.classes) if mode == "unittest" else len(frh01.classes),
-        sequencelength=45
-    )
-
-    return traindataloader, testdataloader, meta
-
-
-def get_model(modelname, ndims, num_classes, sequencelength, device, **hyperparameter):
-    modelname = modelname.lower() #make case invariant
-    if modelname == "omniscalecnn":
-        model = OmniScaleCNN(input_dim=ndims, num_classes=num_classes, sequencelength=sequencelength, **hyperparameter).to(device)
-    elif modelname == "lstm":
-        model = LSTM(input_dim=ndims, num_classes=num_classes, **hyperparameter).to(device)
-    elif modelname == "starrnn":
-        model = StarRNN(input_dim=ndims,
-                        num_classes=num_classes,
-                        bidirectional=False,
-                        use_batchnorm=False,
-                        use_layernorm=True,
-                        device=device,
-                        **hyperparameter).to(device)
-    elif modelname == "inceptiontime":
-        model = InceptionTime(input_dim=ndims, num_classes=num_classes, device=device,
-                              **hyperparameter).to(device)
-    elif modelname == "msresnet":
-        model = MSResNet(input_dim=ndims, num_classes=num_classes, **hyperparameter).to(device)
-    elif modelname in ["transformerencoder","transformer"]:
-        model = TransformerModel(input_dim=ndims, num_classes=num_classes,
-                            activation="relu",
-                            **hyperparameter).to(device)
-    elif modelname in ["petransformer"]:
-        model = PETransformerModel(input_dim=ndims, num_classes=num_classes,
-                                 activation="relu",
-                                 **hyperparameter).to(device)
-    elif modelname == "tempcnn":
-        model = TempCNN(input_dim=ndims, num_classes=num_classes, sequencelength=sequencelength, **hyperparameter).to(
-            device)
-    else:
-        raise ValueError("invalid model argument. choose from 'LSTM','MSResNet','TransformerEncoder', or 'TempCNN'")
+        raise ValueError("Invalid model argument. Choose from 'supervised', 'freeze', or 'fine-tuning'.")
 
     return model
+
 
 def metrics(y_true, y_pred):
     accuracy = sklearn.metrics.accuracy_score(y_true, y_pred)
@@ -204,49 +192,31 @@ def test_epoch(model, criterion, dataloader, device):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Train an evaluate time series deep learning models on the'
-                                                 'BreizhCrops dataset. This script trains a model on training dataset'
-                                                 'partition, evaluates performance on a validation or evaluation partition'
+    parser = argparse.ArgumentParser(description='Train and evaluate tempCNN pretrained model on multimodal time series dataset'
+                                                 'This script trains a model on training dataset'
+                                                 'set, evaluates performance on a validation and  test set'
                                                  'and stores progress and model paths in --logdir')
-    parser.add_argument(
-        'model', type=str, default="LSTM", help='select model architecture. Available models are '
-                                                '"LSTM","TempCNN","MSRestNet","TransformerEncoder"')
+    parser.add_argument("--mode", type=str, choices=["supervised", "freeze", "fine-tuning"], default="supervised", help="Mode for downstream task")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Path to the pretrained model checkpoint file")
     parser.add_argument(
         '-b', '--batchsize', type=int, default=1024, help='batch size (number of time series processed simultaneously)')
     parser.add_argument(
-        '-e', '--epochs', type=int, default=150, help='number of training epochs (training on entire dataset)')
+        '-e', '--epochs', type=int, default=100, help='number of training epochs (training on entire dataset)')
     parser.add_argument(
-        '-m', '--mode', type=str, default="validation", help='training mode. Either "validation" '
-                                                             '(train on FRH01+FRH02 test on FRH03) or '
-                                                             '"evaluation" (train on FRH01+FRH02+FRH03 test on FRH04)')
-    parser.add_argument(
-        '-D', '--datapath', type=str, default="../data", help='directory to download and store the dataset')
+        '-D', '--datapath', type=str, help='directory to time series dataset and labels file')
     parser.add_argument(
         '-w', '--workers', type=int, default=0, help='number of CPU workers to load the next batch')
-    parser.add_argument(
-        '-H', '--hyperparameter', type=str, default=None, help='model specific hyperparameter as single string, '
-                                                               'separated by comma of format param1=value1,param2=value2')
-    parser.add_argument(
-        '--level', type=str, default="L1C", help='Sentinel 2 processing level (L1C, L2A)')
     parser.add_argument(
         '--weight-decay', type=float, default=1e-6, help='optimizer weight_decay (default 1e-6)')
     parser.add_argument(
         '--learning-rate', type=float, default=1e-2, help='optimizer learning rate (default 1e-2)')
     parser.add_argument(
-        '--preload-ram', action='store_true', help='load dataset into RAM upon initialization')
-    parser.add_argument(
         '-d', '--device', type=str, default=None, help='torch.Device. either "cpu" or "cuda". '
                                                        'default will check by torch.cuda.is_available() ')
     parser.add_argument(
-        '-l', '--logdir', type=str, default="/tmp", help='logdir to store progress and models (defaults to /tmp)')
+        '-l', '--logdir', type=str, default="logs", help='logdir to store progress and logs')
     args = parser.parse_args()
 
-    hyperparameter_dict = dict()
-    if args.hyperparameter is not None:
-        for hyperparameter_string in args.hyperparameter.split(","):
-            param, value = hyperparameter_string.split("=")
-            hyperparameter_dict[param] = float(value) if '.' in value else int(value)
-    args.hyperparameter = hyperparameter_dict
 
     if args.device is None:
         args.device = "cuda" if torch.cuda.is_available() else "cpu"
