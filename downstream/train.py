@@ -104,14 +104,14 @@ def train(args):
 
 
 
-def get_model(mode, num_classes, device, pretrained_path=None, **hyperparameter):
+def get_model(mode, num_classes, device, pretrained_path=None):
     mode = mode.lower()  # make case invariant
     
     if mode == "supervised":
-        model = TemporalCNN(num_classes=num_classes, **hyperparameter).to(device)
+        model = TemporalCNN(num_classes=num_classes).to(device)
         
     elif mode == "freeze" or mode == "fine-tuning":
-        model = TemporalCNN(num_classes=num_classes, **hyperparameter).to(device)
+        model = TemporalCNN(num_classes=num_classes).to(device)
         
         if pretrained_path is not None:
             model.load_state_dict(torch.load(pretrained_path))  # Load pretrained model weights
@@ -153,7 +153,6 @@ def metrics(y_true, y_pred):
         precision_weighted=precision_weighted,
     )
 
-
 def train_epoch(model, optimizer, criterion, dataloader, device):
     model.train()
     losses = []
@@ -161,28 +160,14 @@ def train_epoch(model, optimizer, criterion, dataloader, device):
         for idx, batch in iterator:
             optimizer.zero_grad()
             x1, x2, y_true = batch
-            x1 = x1.to(device)
-            x2 = x2.to(device)
-            y_true = y_true.to(device)
-
-            # Forward pass
-            logits = model(x1, x2)
-            logprobabilities = torch.log_softmax(logits, dim=-1)
-
-            # Compute loss
-            loss = criterion(logprobabilities, y_true)
-
-            # Backward pass and optimization step
+            output = model.forward(x1.to(device), x2.to(device))
+            loss = criterion(output, y_true.to(device))
             loss.backward()
             optimizer.step()
-
-            # Record loss
-            losses.append(loss.item())
-
-            # Update progress bar
-            iterator.set_description(f"train loss={loss.item():.2f}")
-
+            iterator.set_description(f"train loss={loss:.2f}")
+            losses.append(loss)
     return torch.stack(losses)
+
 
 
 
@@ -193,30 +178,20 @@ def test_epoch(model, criterion, dataloader, device):
         y_true_list = []
         y_pred_list = []
         y_score_list = []
-        field_ids_list = []
         with tqdm(enumerate(dataloader), total=len(dataloader), leave=True) as iterator:
             for idx, batch in iterator:
-                x1, x2, y_true, field_id = batch
-                x1 = x1.to(device)
-                x2 = x2.to(device)
-                y_true = y_true.to(device)
-
-                # Forward pass
-                logits = model(x1, x2)
-                logprobabilities = torch.log_softmax(logits, dim=-1)
-
-                # Compute loss
-                loss = criterion(logprobabilities, y_true)
-
-                iterator.set_description(f"test loss={loss.item():.2f}")
-                losses.append(loss.item())
+                x1, x2, y_true = batch
+                log_probabilities = model.forward(x1.to(device), x2.to(device))
+                loss = criterion(log_probabilities, y_true.to(device))
+                iterator.set_description(f"test loss={loss:.2f}")
+                losses.append(loss)
                 y_true_list.append(y_true)
-                y_pred_list.append(logprobabilities.argmax(-1))
-                y_score_list.append(logprobabilities.exp())
-                field_ids_list.append(field_id)
+                y_pred_list.append(log_probabilities.argmax(dim=1))
+                y_score_list.append(log_probabilities[:, 1])  # Predicted probabilities for class 1
 
-        return (torch.tensor(losses), torch.cat(y_true_list), torch.cat(y_pred_list), torch.cat(y_score_list), torch.cat(field_ids_list))
-    
+
+        return (torch.stack(losses),torch.cat(y_true_list),torch.cat(y_pred_list),torch.cat(y_score_list))
+
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -304,3 +279,6 @@ if __name__ == "__main__":
     args = parse_args()
 
     train(args)
+
+
+
