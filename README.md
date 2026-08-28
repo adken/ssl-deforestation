@@ -51,7 +51,3 @@ The learned representations are evaluated on a supervised deforestation-mapping 
 * Representation learning
 * VICReg
 * TempCNN
-
-
-**Adriko Kennedy**
-
