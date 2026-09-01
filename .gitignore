@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+logs/
+checkpoints/
+*.pth
+*.pt
+*.npy
+.DS_Store
