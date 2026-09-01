@@ -1,106 +1,88 @@
-import os
+"""TemporalCNN classifier for downstream binary deforestation mapping."""
+
+from pathlib import Path
+
 import torch
 import torch.nn as nn
-import torch.utils.data
 
-
-
-class TempCNN(torch.nn.Module):
-    def __init__(self, input_dim=10, kernel_size=7, hidden_dims=128, dropout=0.18203942949809093):
-        super(TempCNN, self).__init__()
-        self.modelname = f"TempCNN_input-dim={input_dim}_kernelsize={kernel_size}_hidden-dims={hidden_dims}_dropout={dropout}"
-
-        self.hidden_dims = hidden_dims
-
-        self.conv_bn_relu1 = Conv1D_BatchNorm_Relu_Dropout(input_dim, hidden_dims, kernel_size=kernel_size,
-                                                           drop_probability=dropout)
-        self.conv_bn_relu2 = Conv1D_BatchNorm_Relu_Dropout(hidden_dims, hidden_dims, kernel_size=kernel_size,
-                                                           drop_probability=dropout)
-        self.conv_bn_relu3 = Conv1D_BatchNorm_Relu_Dropout(hidden_dims, hidden_dims, kernel_size=kernel_size,
-                                                           drop_probability=dropout)
-        
-        # Global average pooling goes here
-        self.pool = nn.AdaptiveAvgPool1d(1)
-
-    def forward(self, x):
-        # require NxTxD
-        #x = x.transpose(1,2)
-        x = self.conv_bn_relu1(x)
-        x = self.conv_bn_relu2(x)
-        x = self.conv_bn_relu3(x)
-
-        # global average pooling
-        x = self.pool(x)
-        
-        return x
-
-
-    def save(self, path="model.pth", **kwargs):
-        print("\nsaving model to " + path)
-        model_state = self.state_dict()
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        torch.save(dict(model_state=model_state, **kwargs), path)
-
-    def load(self, path):
-        print("loading model from " + path)
-        snapshot = torch.load(path, map_location="cpu")
-        model_state = snapshot.pop('model_state', snapshot)
-        self.load_state_dict(model_state)
-        return snapshot
-
-
-class Conv1D_BatchNorm_Relu_Dropout(torch.nn.Module):
-    def __init__(self, input_dim, hidden_dims, kernel_size=5, drop_probability=0.5):
-        super(Conv1D_BatchNorm_Relu_Dropout, self).__init__()
-
-        self.block = nn.Sequential(
-            nn.Conv1d(input_dim, hidden_dims, kernel_size, padding=(kernel_size // 2)),
-            nn.BatchNorm1d(hidden_dims),
-            nn.ReLU(),
-            nn.Dropout(p=drop_probability)
-        )
-
-    def forward(self, X):
-        return self.block(X)
-
-
+from models.tempCNN import TempCNN
 
 
 class TemporalCNN(nn.Module):
-    def __init__(self, hidden_dim=128, expander_dim=256, num_classes=10):
-        super().__init__()
-         # Define the layers of the TempCNN encoder
-        self.encoder_s1 = TempCNN(input_dim=2, kernel_size=7, hidden_dims=hidden_dim, dropout=0.5)
-        self.encoder_s2 = TempCNN(input_dim=10, kernel_size=7, hidden_dims=hidden_dim, dropout=0.5)
+    """Fuse pretrained or randomly initialized S1/S2 TempCNN encoders."""
 
-        self.mlp = nn.Sequential(
+    def __init__(
+        self,
+        hidden_dim: int = 128,
+        expander_dim: int = 256,
+        num_classes: int = 2,
+    ) -> None:
+        super().__init__()
+        self.modelname = (
+            f"TemporalCNN_h={hidden_dim}_exp={expander_dim}_cls={num_classes}"
+        )
+        self.encoder_s1 = TempCNN(
+            input_dim=2, kernel_size=7, hidden_dims=hidden_dim, dropout=0.5
+        )
+        self.encoder_s2 = TempCNN(
+            input_dim=10, kernel_size=7, hidden_dims=hidden_dim, dropout=0.5
+        )
+        self.head = nn.Sequential(
             nn.Linear(2 * hidden_dim, expander_dim),
             nn.ReLU(),
             nn.Linear(expander_dim, expander_dim),
-            nn.ReLU()
+            nn.ReLU(),
         )
-        # Create the final classifier layer
         self.classifier = nn.Linear(expander_dim, num_classes)
+        self._encoders_frozen = False
 
-    # Pass the inputs through the TempCNN encoders
-    def forward(self, s1, s2):
+    def forward(self, s1: torch.Tensor, s2: torch.Tensor) -> torch.Tensor:
         repr_s1 = self.encoder_s1(s1)
         repr_s2 = self.encoder_s2(s2)
+        fused = torch.cat((repr_s1, repr_s2), dim=1)
+        return self.classifier(self.head(fused))
 
-        # Flatten the representations
-        repr_s1 = repr_s1.view(repr_s1.size(0), -1)
-        repr_s2 = repr_s2.view(repr_s2.size(0), -1)
+    def load_pretrained_encoders(
+        self, checkpoint_path: str, device: str | torch.device = "cpu"
+    ) -> None:
+        """Load only the S1/S2 encoders from a VICReg checkpoint."""
+        checkpoint_path = str(Path(checkpoint_path))
+        state = torch.load(checkpoint_path, map_location=device)
+        full_state = state.get("model", state)
 
-        # Concatenate the representations from both encoders
-        combined_repr = torch.cat((repr_s1, repr_s2), dim=1)
+        s1_state = {
+            key.removeprefix("encoder_s1."): value
+            for key, value in full_state.items()
+            if key.startswith("encoder_s1.")
+        }
+        s2_state = {
+            key.removeprefix("encoder_s2."): value
+            for key, value in full_state.items()
+            if key.startswith("encoder_s2.")
+        }
 
-        mlp_output = self.mlp(combined_repr)
-        output = self.classifier(mlp_output)
+        if not s1_state or not s2_state:
+            raise ValueError(
+                "Checkpoint does not contain encoder_s1.* and encoder_s2.* weights"
+            )
 
-        return output
+        self.encoder_s1.load_state_dict(s1_state, strict=True)
+        self.encoder_s2.load_state_dict(s2_state, strict=True)
 
+    def freeze_encoders(self) -> None:
+        """Freeze feature encoders while leaving the downstream head trainable."""
+        for parameter in self.encoder_s1.parameters():
+            parameter.requires_grad = False
+        for parameter in self.encoder_s2.parameters():
+            parameter.requires_grad = False
+        self._encoders_frozen = True
+        self.encoder_s1.eval()
+        self.encoder_s2.eval()
 
-# Create the model  
-if __name__ == '__main__':
-    model = TemporalCNN()
-
+    def train(self, mode: bool = True):
+        """Keep frozen encoders in eval mode so BN/dropout do not drift."""
+        super().train(mode)
+        if self._encoders_frozen:
+            self.encoder_s1.eval()
+            self.encoder_s2.eval()
+        return self

@@ -1,284 +1,253 @@
-import torch
-from torchvision import datasets
-from torch.utils.data import DataLoader
-from utils.dataset import TimeSeriesDataset
-from models.tempCNN import TemporalCNN
+"""Train/evaluate supervised, frozen-SSL, and fine-tuned deforestation models.
+
+Run from the repository root with, for example::
+
+    python -m downstream.train --mode supervised --datapath /path/to/data
+    python -m downstream.train --mode freeze --checkpoint checkpoints/best_checkpoint.pth --datapath /path/to/data
+    python -m downstream.train --mode fine-tuning --checkpoint checkpoints/best_checkpoint.pth --datapath /path/to/data
+"""
+
 import argparse
-from torch.utils.tensorboard import SummaryWriter
 import os
-from tqdm import tqdm
-from torch.utils.data import DataLoader
-from tqdm import tqdm
-from torch.optim import Adam
-import torch
-import pandas as pd
-import os
-import sklearn.metrics
 import random
-import matplotlib.pyplot, numpy
-from sklearn.metrics import confusion_matrix 
-from sklearn.utils.multiclass import unique_labels
 
-def train(args):
-        
-    # Set a seed for reproducibility
-    seed = 42
+import numpy as np
+import pandas as pd
+import sklearn.metrics
+import torch
+from torch.optim import Adam
+from torch.utils.data import DataLoader, random_split
+from tqdm import tqdm
+
+from .models.tempCNN import TemporalCNN
+from .utils.dataset import TimeSeriesDataset
+
+
+def set_seed(seed: int) -> None:
     random.seed(seed)
+    np.random.seed(seed)
     torch.manual_seed(seed)
-
-    dataset = TimeSeriesDataset(path=args.path)
-
-    # Define the sizes for train, test, and validation sets
-    train_ratio = 0.3  # 30% of the dataset for training
-    test_ratio = 0.4   # 10% of the dataset for testing
-    val_ratio = 0.3    # 10% of the dataset for validation
-
-    # Calculate the sizes of each set
-    train_size = int(len(dataset) * train_ratio)
-    test_size = int(len(dataset) * test_ratio)
-    val_size = len(dataset) - train_size - test_size
-
-    # Split the dataset into train, test, and validation sets
-    train_ds, test_ds, val_ds = torch.utils.data.random_split(dataset, [train_size, test_size, val_size])
-
-    # Create data loaders for each set
-    train_dl = DataLoader(train_ds, batch_size=args.batch_size, drop_last=True, shuffle=False, num_workers=args.num_workers, prefetch_factor=2)
-    test_dl = DataLoader(test_ds, batch_size=args.batch_size, drop_last=True, shuffle=False, num_workers=args.num_workers, prefetch_factor=2)
-    val_dl = DataLoader(val_ds, batch_size=args.batch_size, drop_last=True, shuffle=False, num_workers=args.num_workers, prefetch_factor=2)
-
-    num_classes = 2
-    # define model
-    device = torch.device(args.device)
-    model = get_model(args.mode, num_classes, device)
-    optimizer = Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
-    model.modelname += f"_learning-rate={args.learning_rate}_weight-decay={args.weight_decay}"
-    print(f"Initialized {model.modelname}")
-
-    logdir = os.path.join(args.logdir, model.modelname)
-    os.makedirs(logdir, exist_ok=True)
-    print(f"Logging results to {logdir}")
-
-    criterion = torch.nn.CrossEntropyLoss(reduction="mean")
-    log = []
-    best_val_loss = float('inf')
-    best_model = None
-
-    for epoch in range(args.epochs):
-        train_loss = train_epoch(model, optimizer, criterion, train_dl, device)
-        val_loss, y_true_val, y_pred_val, *_ = test_epoch(model, criterion, val_dl, device)
-        val_scores = metrics(y_true_val.cpu(), y_pred_val.cpu())
-        val_scores_msg = ", ".join([f"{k}={v:.2f}" for (k, v) in val_scores.items()])
-        val_loss = val_loss.cpu().detach().numpy()[0]
-        train_loss = train_loss.cpu().detach().numpy()[0]
-        print(f"epoch {epoch}: train_loss={train_loss:.2f}, val_loss={val_loss:.2f} " + val_scores_msg)
-
-        scores = {}
-        scores["epoch"] = epoch
-        scores["trainloss"] = train_loss
-        scores["val_loss"] = val_loss
-        log.append(scores)
-
-        log_df = pd.DataFrame(log).set_index("epoch")
-        log_df.to_csv(os.path.join(logdir, "trainlog.csv"))
-
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_model = model.state_dict()
-
-    # Load the best model for testing
-    model.load_state_dict(best_model)
-
-    # Perform the final evaluation on the test set
-    test_loss, y_true_test, y_pred_test, *_ = test_epoch(model, criterion, test_dl, device)
-    test_scores = metrics(y_true_test.cpu(), y_pred_test.cpu())
-    test_scores_msg = ", ".join([f"{k}={v:.2f}" for (k, v) in test_scores.items()])
-    test_loss = test_loss.cpu().detach().numpy()[0]
-    print(f"Final test_loss={test_loss:.2f} " + test_scores_msg)
-
-    test_scores["test_loss"] = test_loss
-    test_log = pd.DataFrame([test_scores])
-    test_log.to_csv(os.path.join(logdir, "testlog.csv"))
-
-    val_log_df = pd.DataFrame(log).set_index("epoch")
-    val_log_df.to_csv(os.path.join(logdir, "vallog.csv"))
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
+def get_model(
+    mode: str,
+    num_classes: int,
+    device: torch.device,
+    checkpoint_path: str | None = None,
+) -> TemporalCNN:
+    mode = mode.lower()
+    model = TemporalCNN(num_classes=num_classes).to(device)
 
-def get_model(mode, num_classes, device, pretrained_path=None):
-    mode = mode.lower()  # make case invariant
-    
-    if mode == "supervised":
-        model = TemporalCNN(num_classes=num_classes).to(device)
-        
-    elif mode == "freeze" or mode == "fine-tuning":
-        model = TemporalCNN(num_classes=num_classes).to(device)
-        
-        if pretrained_path is not None:
-            model.load_state_dict(torch.load(pretrained_path))  # Load pretrained model weights
-        
+    if mode in {"freeze", "fine-tuning"}:
+        if checkpoint_path is None:
+            raise ValueError(f"--checkpoint is required for mode='{mode}'")
+        model.load_pretrained_encoders(checkpoint_path, device=device)
         if mode == "freeze":
-            for param in model.parameters():
-                param.requires_grad = False  # Freeze the model parameters
-    
-    else:
-        raise ValueError("Invalid model argument. Choose from 'supervised', 'freeze', or 'fine-tuning'.")
+            model.freeze_encoders()
+    elif mode != "supervised":
+        raise ValueError(
+            f"Invalid mode '{mode}'. Choose supervised, freeze, or fine-tuning."
+        )
 
     return model
 
 
-def metrics(y_true, y_pred):
-    accuracy = sklearn.metrics.accuracy_score(y_true, y_pred)
-    kappa = sklearn.metrics.cohen_kappa_score(y_true, y_pred)
-    f1_micro = sklearn.metrics.f1_score(y_true, y_pred, average="micro")
-    f1_macro = sklearn.metrics.f1_score(y_true, y_pred, average="macro")
-    f1_weighted = sklearn.metrics.f1_score(y_true, y_pred, average="weighted")
-    recall_micro = sklearn.metrics.recall_score(y_true, y_pred, average="micro")
-    recall_macro = sklearn.metrics.recall_score(y_true, y_pred, average="macro")
-    recall_weighted = sklearn.metrics.recall_score(y_true, y_pred, average="weighted")
-    precision_micro = sklearn.metrics.precision_score(y_true, y_pred, average="micro")
-    precision_macro = sklearn.metrics.precision_score(y_true, y_pred, average="macro")
-    precision_weighted = sklearn.metrics.precision_score(y_true, y_pred, average="weighted")
+def compute_metrics(y_true, y_pred) -> dict:
+    return {
+        "accuracy": sklearn.metrics.accuracy_score(y_true, y_pred),
+        "kappa": sklearn.metrics.cohen_kappa_score(y_true, y_pred),
+        "f1_macro": sklearn.metrics.f1_score(
+            y_true, y_pred, average="macro", zero_division=0
+        ),
+        "f1_weighted": sklearn.metrics.f1_score(
+            y_true, y_pred, average="weighted", zero_division=0
+        ),
+        "recall_macro": sklearn.metrics.recall_score(
+            y_true, y_pred, average="macro", zero_division=0
+        ),
+        "precision_macro": sklearn.metrics.precision_score(
+            y_true, y_pred, average="macro", zero_division=0
+        ),
+    }
 
-    return dict(
-        accuracy=accuracy,
-        kappa=kappa,
-        f1_micro=f1_micro,
-        f1_macro=f1_macro,
-        f1_weighted=f1_weighted,
-        recall_micro=recall_micro,
-        recall_macro=recall_macro,
-        recall_weighted=recall_weighted,
-        precision_micro=precision_micro,
-        precision_macro=precision_macro,
-        precision_weighted=precision_weighted,
-    )
 
-def train_epoch(model, optimizer, criterion, dataloader, device):
+def train_epoch(model, optimizer, criterion, dataloader, device) -> float:
     model.train()
-    losses = []
-    with tqdm(enumerate(dataloader), total=len(dataloader), leave=True) as iterator:
-        for idx, batch in iterator:
+    total_loss = 0.0
+    with tqdm(dataloader, desc="  train", leave=False) as bar:
+        for s1, s2, y_true in bar:
             optimizer.zero_grad()
-            x1, x2, y_true = batch
-            output = model.forward(x1.to(device), x2.to(device))
-            loss = criterion(output, y_true.to(device))
+            logits = model(s1.to(device), s2.to(device))
+            loss = criterion(logits, y_true.to(device))
             loss.backward()
             optimizer.step()
-            iterator.set_description(f"train loss={loss:.2f}")
-            losses.append(loss)
-    return torch.stack(losses)
+            total_loss += loss.item()
+            bar.set_postfix(loss=f"{loss.item():.4f}")
+    return total_loss / len(dataloader)
 
 
-
-
-def test_epoch(model, criterion, dataloader, device):
+def eval_epoch(model, criterion, dataloader, device) -> tuple[float, np.ndarray, np.ndarray]:
     model.eval()
+    total_loss = 0.0
+    y_true_all, y_pred_all = [], []
     with torch.no_grad():
-        losses = []
-        y_true_list = []
-        y_pred_list = []
-        y_score_list = []
-        with tqdm(enumerate(dataloader), total=len(dataloader), leave=True) as iterator:
-            for idx, batch in iterator:
-                x1, x2, y_true = batch
-                log_probabilities = model.forward(x1.to(device), x2.to(device))
-                loss = criterion(log_probabilities, y_true.to(device))
-                iterator.set_description(f"test loss={loss:.2f}")
-                losses.append(loss)
-                y_true_list.append(y_true)
-                y_pred_list.append(log_probabilities.argmax(dim=1))
-                y_score_list.append(log_probabilities[:, 1])  # Predicted probabilities for class 1
+        with tqdm(dataloader, desc="  eval ", leave=False) as bar:
+            for s1, s2, y_true in bar:
+                logits = model(s1.to(device), s2.to(device))
+                loss = criterion(logits, y_true.to(device))
+                total_loss += loss.item()
+                y_true_all.append(y_true.cpu())
+                y_pred_all.append(logits.argmax(dim=1).cpu())
+                bar.set_postfix(loss=f"{loss.item():.4f}")
+
+    avg_loss = total_loss / len(dataloader)
+    return (
+        avg_loss,
+        torch.cat(y_true_all).numpy(),
+        torch.cat(y_pred_all).numpy(),
+    )
 
 
-        return (torch.stack(losses),torch.cat(y_true_list),torch.cat(y_pred_list),torch.cat(y_score_list))
-
-import matplotlib.pyplot as plt
-import numpy as np
-
-def plot_confusion_matrix(y_true, y_pred, classes, normalize=False, title=None, cmap=None):
-    """
-    This function prints and plots the confusion matrix.
-    Normalization can be applied by setting `normalize=True`.
-    """
-    if not title:
-        if normalize:
-            title = "Normalized Confusion Matrix"
-        else:
-            title = "Confusion Matrix"
-
-    # Compute confusion matrix
-    cm = confusion_matrix(y_true, y_pred)
-    # Only use the labels that appear in the data
-    classes = classes[unique_labels(y_true, y_pred)]
-
-    if normalize:
-        cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
-
-    # Plot confusion matrix
-    fig, ax = plt.subplots()
-    im = ax.imshow(cm, interpolation='nearest', cmap=cmap)
-    ax.figure.colorbar(im, ax=ax)
-    ax.set(xticks=np.arange(cm.shape[1]),
-           yticks=np.arange(cm.shape[0]),
-           xticklabels=classes,
-           yticklabels=classes,
-           title=title,
-           ylabel='True label',
-           xlabel='Predicted label')
-
-    # Rotate the tick labels and set alignment
-    plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
-
-    # Loop over data dimensions and create text annotations
-    fmt = '.2f' if normalize else 'd'
-    thresh = cm.max() / 2.
-    for i in range(cm.shape[0]):
-        for j in range(cm.shape[1]):
-            ax.text(j, i, format(cm[i, j], fmt),
-                    ha="center", va="center",
-                    color="white" if cm[i, j] > thresh else "black")
-
-    fig.tight_layout()
-    plt.show()
+def _loader(dataset, args, *, shuffle: bool) -> DataLoader:
+    kwargs = {
+        "batch_size": args.batch_size,
+        "shuffle": shuffle,
+        "num_workers": args.workers,
+        "pin_memory": args.device.startswith("cuda"),
+        "drop_last": False,
+    }
+    if args.workers > 0:
+        kwargs["prefetch_factor"] = 2
+    return DataLoader(dataset, **kwargs)
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description='Train and evaluate tempCNN pretrained model on multimodal time series dataset'
-                                                 'This script trains a model on training dataset'
-                                                 'set, evaluates performance on a validation and  test set'
-                                                 'and stores progress and model paths in --logdir')
-    parser.add_argument("--mode", type=str, choices=["supervised", "freeze", "fine-tuning"], default="supervised", help="Mode for downstream task")
-    parser.add_argument("--checkpoint", type=str, default=None, help="Path to the pretrained model checkpoint file")
+def train(args) -> None:
+    set_seed(args.seed)
+
+    if not (0.0 < args.train_ratio < 1.0 and 0.0 < args.val_ratio < 1.0):
+        raise ValueError("train_ratio and val_ratio must both be between 0 and 1")
+    if args.train_ratio + args.val_ratio >= 1.0:
+        raise ValueError("train_ratio + val_ratio must be < 1")
+
+    dataset = TimeSeriesDataset(path=args.datapath)
+    n = len(dataset)
+    train_size = int(n * args.train_ratio)
+    val_size = int(n * args.val_ratio)
+    test_size = n - train_size - val_size
+    if min(train_size, val_size, test_size) < 1:
+        raise ValueError(
+            f"Dataset/split combination produces an empty split: "
+            f"train={train_size}, val={val_size}, test={test_size}"
+        )
+
+    train_ds, val_ds, test_ds = random_split(
+        dataset,
+        [train_size, val_size, test_size],
+        generator=torch.Generator().manual_seed(args.seed),
+    )
+    train_dl = _loader(train_ds, args, shuffle=True)
+    val_dl = _loader(val_ds, args, shuffle=False)
+    test_dl = _loader(test_ds, args, shuffle=False)
+
+    device = torch.device(args.device)
+    model = get_model(
+        args.mode,
+        num_classes=2,
+        device=device,
+        checkpoint_path=args.checkpoint,
+    )
+    model.modelname += f"_lr={args.learning_rate}_wd={args.weight_decay}"
+
+    optimizer = Adam(
+        (p for p in model.parameters() if p.requires_grad),
+        lr=args.learning_rate,
+        weight_decay=args.weight_decay,
+    )
+    criterion = torch.nn.CrossEntropyLoss()
+
+    logdir = os.path.join(args.logdir, model.modelname)
+    os.makedirs(logdir, exist_ok=True)
+
+    log = []
+    best_val_loss = float("inf")
+    best_state = None
+
+    for epoch in range(args.epochs):
+        train_loss = train_epoch(model, optimizer, criterion, train_dl, device)
+        val_loss, y_val, pred_val = eval_epoch(model, criterion, val_dl, device)
+        val_scores = compute_metrics(y_val, pred_val)
+
+        scores_str = ", ".join(f"{k}={v:.3f}" for k, v in val_scores.items())
+        print(
+            f"Epoch {epoch:>4d}: train_loss={train_loss:.4f} "
+            f"val_loss={val_loss:.4f} {scores_str}"
+        )
+
+        log.append(
+            {
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                **val_scores,
+            }
+        )
+        pd.DataFrame(log).set_index("epoch").to_csv(
+            os.path.join(logdir, "trainlog.csv")
+        )
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_state = {
+                key: value.detach().cpu().clone()
+                for key, value in model.state_dict().items()
+            }
+
+    if best_state is None:
+        raise RuntimeError("No best model was selected; check the training configuration")
+
+    model.load_state_dict(best_state)
+    test_loss, y_test, pred_test = eval_epoch(model, criterion, test_dl, device)
+    test_scores = compute_metrics(y_test, pred_test)
+    test_scores["test_loss"] = test_loss
+
+    scores_str = ", ".join(f"{k}={v:.3f}" for k, v in test_scores.items())
+    print(f"Final test: {scores_str}")
+    pd.DataFrame([test_scores]).to_csv(
+        os.path.join(logdir, "testlog.csv"), index=False
+    )
+    torch.save(best_state, os.path.join(logdir, "best_model.pth"))
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Downstream deforestation classification with TempCNN"
+    )
     parser.add_argument(
-        '-b', '--batchsize', type=int, default=1024, help='batch size (number of time series processed simultaneously)')
+        "--mode",
+        default="supervised",
+        choices=["supervised", "freeze", "fine-tuning"],
+    )
     parser.add_argument(
-        '-e', '--epochs', type=int, default=100, help='number of training epochs (training on entire dataset)')
+        "--checkpoint", default=None, help="Path to VICReg pretraining checkpoint"
+    )
+    parser.add_argument("--datapath", required=True)
+    parser.add_argument("--batch_size", type=int, default=1024)
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--weight_decay", type=float, default=1e-6)
+    parser.add_argument("--learning_rate", type=float, default=1e-2)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--logdir", default="logs")
+    parser.add_argument("--train_ratio", type=float, default=0.6)
+    parser.add_argument("--val_ratio", type=float, default=0.2)
     parser.add_argument(
-        '-D', '--datapath', type=str, help='directory to time series dataset and labels file')
-    parser.add_argument(
-        '-w', '--workers', type=int, default=0, help='number of CPU workers to load the next batch')
-    parser.add_argument(
-        '--weight-decay', type=float, default=1e-6, help='optimizer weight_decay (default 1e-6)')
-    parser.add_argument(
-        '--learning-rate', type=float, default=1e-2, help='optimizer learning rate (default 1e-2)')
-    parser.add_argument(
-        '-d', '--device', type=str, default=None, help='torch.Device. either "cpu" or "cuda". '
-                                                       'default will check by torch.cuda.is_available() ')
-    parser.add_argument(
-        '-l', '--logdir', type=str, default="logs", help='logdir to store progress and logs')
-    args = parser.parse_args()
-
-
-    if args.device is None:
-        args.device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    return args
+        "--device",
+        default="cuda" if torch.cuda.is_available() else "cpu",
+    )
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    args = parse_args()
-
-    train(args)
-
-
-
+    train(parse_args())
